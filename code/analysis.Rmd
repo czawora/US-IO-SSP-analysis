@@ -1,0 +1,644 @@
+---
+title: "prep"
+output: html_document
+date: "`r Sys.Date()`"
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(glue)
+library(ggbump)
+library(ggridges)
+library(janitor)
+
+here::i_am("code/analysis.Rmd")
+library(here)
+
+proj_root <- here()
+```
+
+# Per-year SSP analysis showing existence and change in SSP over time
+# SSP analysis, both pre-latent and contemp, for inflations of interest
+
+```{r}
+
+calc_inflation_impact <- function(shock_sector_idx, 
+                                  shock_pct, 
+                                  A,
+                                  exogenous_idx,
+                                  consump_share_df){
+  
+  all_idx <- 1:nrow(A)
+  X_idx <- sort(unique(c(shock_sector_idx, exogenous_idx)))
+  E_idx <- all_idx[!(all_idx %in% X_idx)]
+  
+  consump_share_X <- 
+    consump_share_df %>%
+    filter(row_number() %in% X_idx) %>%
+    pull(share_personal_consump)
+  
+  consump_share_E <- 
+    consump_share_df %>%
+    filter(row_number() %in% E_idx) %>%
+    pull(share_personal_consump)
+  
+  A_EE <- A[E_idx, E_idx]
+  A_XE <- A[X_idx, E_idx]
+  
+  I_mat <- matrix(0, nrow = nrow(A_EE), ncol = ncol(A_EE))
+  diag(I_mat) <- 1
+  
+  dP_X <- matrix(0, nrow = length(X_idx), ncol = 1)
+  dP_X_shock_idx <- which(X_idx == shock_sector_idx)
+  dP_X[dP_X_shock_idx, 1] <- shock_pct
+  
+  dP_E <- solve(I_mat - t(A_EE)) %*% t(A_XE) %*% dP_X
+  
+  impact_df <- 
+    tibble(
+      impact_dir = as.numeric(consump_share_X %*% dP_X),
+      impact_indir = as.numeric(consump_share_E %*% dP_E),
+      impact_total = impact_dir + impact_indir
+    )
+  
+  return(impact_df)
+}
+
+perform_ssp_analysis <- function(
+    analysis_year,
+    use_df,
+    make_df, 
+    import_df,
+    industry_codes_df,
+    price_index_df,
+    total_industry_output_df,
+    total_commodity_output_df,
+    consumption_df,
+    consumption_import_df,
+    results_path, 
+    exogenous_industry_codes,
+    price_vol_range=0, 
+    price_change_range=0
+    ){
+  
+    # price_vol_range=0
+    # price_change_range=1
+  # analysis_year <- 1950
+  # input_data_path <- prepared_data_path
+  # results_path <- analysis_output_path
+  # price_vol_range <- 3
+  # 
+  dir.create(results_path, recursive = T)
+
+  results_opath <- glue("{results_path}/{analysis_year}_results.csv")
+  inflation_impact_plot_path <- glue("{results_path}/{analysis_year}_all_industry_impact.png")
+
+  # EXOGENOUS SECTORS
+  sorted_industry_df <-
+    industry_codes_df %>%
+    arrange(code_name)
+  
+  always_exogenous_idx <- 
+    sorted_industry_df %>%
+    mutate(industry_idx = row_number()) %>%
+    filter(code %in% exogenous_industry_codes) %>%
+    pull(industry_idx)
+  
+  # CREATE DOMESTIC CONSUMPTION VECTOR
+  domestic_consumption_df <- 
+    consumption_df %>%
+    left_join(
+      consumption_import_df,
+      by = "commodity"
+    ) %>%
+    transmute(
+      commodity,
+      domestic_PCE = F010_Personal_consumption_expenditures - import_PCE
+    )
+    
+  # PULL OUT NEEDED VECTORS
+  total_commodity_consumption_vec <-
+    domestic_consumption_df %>%
+    arrange(commodity) %>%
+    pull(domestic_PCE)
+
+  total_commodity_output <- 
+    total_commodity_output_df %>%
+    arrange(commodity) %>%
+    pull(total_output) 
+  
+  total_industry_output <- 
+    total_industry_output_df %>%
+    arrange(industry) %>%
+    pull(Total_Industry_Output)
+
+  # SORT TABLES
+  use_df <- 
+    use_df %>%
+    arrange(commodity) %>%
+    select(sort(colnames(.))) %>%
+    select(commodity, everything())
+
+  make_df <- 
+    make_df %>%
+    arrange(industry) %>%
+    select(sort(colnames(.))) %>%
+    select(industry, everything())
+  
+  import_df <- 
+    import_df %>%
+    arrange(commodity) %>%
+    select(sort(colnames(.))) %>%
+    select(commodity, everything())    
+
+  # SAFETY CHECK: all columns and rows are aligned
+  make_use_commodity_match = !all(colnames(make_df)[2:ncol(make_df)] == use_df$commodity)
+  if (make_use_commodity_match){
+    stop("make_use_commodity_match")
+  }
+  
+  make_use_industry_match = !all(make_df$industry == colnames(use_df)[2:ncol(use_df)])
+  if(make_use_industry_match){
+    stop("make_use_industry_match")
+  }
+  
+  import_use_commodity_match = !all(import_df$commodity == use_df$commodity)
+  if (import_use_commodity_match){
+    stop("import_use_commodity_match")
+  }
+
+  import_use_industry_match = !all(colnames(import_df) == colnames(use_df))
+  if (import_use_industry_match){
+    stop("import_use_industry_match")
+  }
+
+  
+  # CREATE USE MAT 
+  use_mat <- as.matrix(use_df[,2:ncol(use_df)]) 
+  import_mat <- as.matrix(import_df[,2:ncol(import_df)]) 
+
+  # DIRECT REQUIREMENT MATRIX
+  total_industry_output_imat <- matrix(0, 
+                                       nrow = length(total_industry_output),
+                                       ncol = length(total_industry_output))
+  diag(total_industry_output_imat) <- 1/total_industry_output
+
+  direct_require_mat <- (use_mat - import_mat) %*% total_industry_output_imat
+    
+  # MARKET SHARE MAT
+  total_commodity_output_imat <- matrix(0, 
+                                        nrow = length(total_commodity_output),
+                                        ncol = length(total_commodity_output))
+  diag(total_commodity_output_imat) <- 1/total_commodity_output
+
+  make_mat <-
+    make_df %>%
+    select(-c(industry)) %>%
+    as.matrix()
+  
+  market_share_mat <- make_mat %*% total_commodity_output_imat
+  
+  # COEFFICIENT MATRIX AND INVERSE
+  iden_mat <- matrix(0, 
+                   nrow = nrow(market_share_mat), 
+                   ncol = nrow(market_share_mat))
+  diag(iden_mat) <- 1
+
+  A <- market_share_mat %*% direct_require_mat
+  L <- solve(iden_mat - A)
+
+  # FORWARD LINKAGES
+  forward_link_df <- 
+    data.frame(
+      industry = sorted_industry_df$code_name,
+      fl = rowSums(L)
+    ) %>%
+    arrange(desc(fl)) %>%
+    mutate(rank_fl = row_number())
+  
+  # CONSUMPTION SHARES
+  indus_total_consump_vec <- market_share_mat %*% total_commodity_consumption_vec
+  indus_share_consump_vec <- indus_total_consump_vec / sum(indus_total_consump_vec)
+  indus_share_consump_df <- 
+    data.frame(
+      industry = sorted_industry_df$code_name,
+      share_personal_consump = indus_share_consump_vec
+      ) %>%
+    mutate(
+      share_personal_consump = ifelse(
+        share_personal_consump >= 0,
+        share_personal_consump, 0),
+    )
+  
+  # CALC SHOCKS
+  gross_price_colnames <- colnames(price_index_df)
+  time_frame_years <- gross_price_colnames[2:length(gross_price_colnames)] %>% as.numeric()
+  
+  time_frame_min <- min(time_frame_years)
+  time_frame_max <- max(time_frame_years)
+    
+  # EQUAL ACROSS INDUSTRY
+  if (price_vol_range == 0 && price_change_range == 0){
+  
+    inflation_impact_df <- 
+      tibble(
+        industry = sorted_industry_df$code_name,
+      ) %>%
+      mutate(
+        industry_idx = row_number(),
+        price_shock_pct = 0.01,
+        inflation_impact = map2_dfr(
+          industry_idx, price_shock_pct, 
+          calc_inflation_impact, 
+          A, always_exogenous_idx, indus_share_consump_df)
+      ) %>%
+      unnest(inflation_impact) 
+  
+  } else if (price_vol_range != 0 && price_change_range == 0) {
+    # SHOCKS BASED ON HISTORICAL VOL 
+    
+    if (analysis_year - price_vol_range < time_frame_min){
+      stop()
+    }
+    
+    gross_price_pivot_df <- 
+      price_index_df %>%
+      pivot_longer(-industry, names_to = "year", values_to = "index") %>%
+      mutate(year = as.numeric(year)) %>%
+      filter(year <= time_frame_max & year >= time_frame_min)
+    
+    avg_pct_change_df <- 
+      gross_price_pivot_df %>%
+      group_by(industry) %>%
+      filter(year == analysis_year | year == analysis_year - price_vol_range) %>%
+      mutate(
+        year_pos = ifelse(year == analysis_year, "end", "start")
+      ) %>%
+      select(-year) %>%
+      pivot_wider(industry, names_from = year_pos, values_from = index) %>%
+      mutate(avg_pct_change = (end/start)^(1/(price_vol_range)) - 1)
+    
+    gross_price_vol_df <- 
+      gross_price_pivot_df %>%
+      group_by(industry) %>%
+      mutate(
+        lag1 = lag(index),
+        pct_change = (index - lag1)/lag1
+        ) %>%
+      drop_na() %>%
+      left_join(avg_pct_change_df, by = "industry") %>%
+      mutate(
+        sq_diff_avg_pct_change = (pct_change - avg_pct_change)^2,
+      ) %>%
+      summarize(
+        mean_sq_diff = mean(sq_diff_avg_pct_change),
+      ) %>%
+      transmute(
+        industry,
+        price_vol_pct = sqrt(mean_sq_diff)
+      )
+    
+    inflation_impact_df <- 
+      tibble(
+        industry = sorted_industry_df$code_name,
+      ) %>%
+      left_join(gross_price_vol_df, by = "industry") %>%
+      rename(price_shock_pct = price_vol_pct) %>%
+      mutate(
+        industry_idx = row_number(),
+        inflation_impact = map2_dfr(
+          industry_idx, price_shock_pct, 
+          calc_inflation_impact, 
+          A, always_exogenous_idx, indus_share_consump_df)
+      ) %>%
+      unnest(inflation_impact) 
+    
+  } else if (price_vol_range == 0 && price_change_range != 0) {
+
+    if (analysis_year - price_change_range < time_frame_min){
+      stop()
+    }
+    
+    gross_price_pivot_df <- 
+      price_index_df %>%
+      pivot_longer(-industry, names_to = "year", values_to = "index") %>%
+      mutate(year = as.numeric(year)) %>%
+      filter(year <= time_frame_max & year >= time_frame_min)
+    
+    avg_pct_change_df <- 
+      gross_price_pivot_df %>%
+      group_by(industry) %>%
+      filter(year == analysis_year | year == analysis_year - price_change_range) %>%
+      mutate(
+        year_pos = ifelse(year == analysis_year, "end", "start")
+      ) %>%
+      select(-year) %>%
+      pivot_wider(industry, names_from = year_pos, values_from = index) %>%
+      transmute(
+        industry,
+        avg_pct_change = (end/start)^(1/(price_change_range)) - 1
+      )
+    
+    inflation_impact_df <- 
+      tibble(
+        industry = sorted_industry_df$code_name,
+      ) %>%
+      left_join(avg_pct_change_df, by = "industry") %>%
+      rename(price_shock_pct = avg_pct_change) %>%
+      mutate(
+        industry_idx = row_number(),
+        inflation_impact = map2_dfr(
+          industry_idx, price_shock_pct, 
+          calc_inflation_impact, 
+          A, always_exogenous_idx, indus_share_consump_df)
+      ) %>%
+      unnest(inflation_impact) 
+    
+  }
+  
+  # RESULTS
+    
+  results_df <- 
+    indus_share_consump_df %>%
+    left_join(
+      forward_link_df,
+      by = "industry"
+    ) %>%
+    left_join(
+      inflation_impact_df %>% select(-c(industry_idx)),
+      by = "industry"
+    ) %>%
+    separate(industry, c("industry", "name"), "_", extra = "merge") %>%
+    arrange(desc(impact_total)) %>%
+    mutate(
+      year = analysis_year,
+      price_shock_pct = price_shock_pct * 100, 
+      share_personal_consump = share_personal_consump *100,
+      impact_dir = impact_dir * 100,
+      impact_indir = impact_indir * 100,
+      impact_total = impact_total * 100,
+      impact_rank = row_number()
+    ) 
+
+  results_df %>% write_csv(results_opath)
+  
+  # PLOT
+  inflation_impact_plot <- 
+      results_df %>%
+      arrange(desc(impact_total)) %>%
+      mutate(
+        name = str_replace_all(name, "_", " "),
+        num = str_pad(row_number(), 2, "left", "0"),
+        name = glue("{name} [{num}]")
+        ) %>%
+      ggplot() + 
+      geom_col(aes(x = impact_total, y = fct_reorder(name, impact_total)), 
+               color = "darkblue", fill = "darkblue", width = 0.4) + 
+      geom_col(aes(x = impact_dir, y = fct_reorder(name, impact_total)), 
+               color = "gold", fill = "gold", width = 0.4) +
+      ylab("industry") + 
+      xlab("inflation impact (%)") + 
+      labs(subtitle = glue("Inflation Impact [{analysis_year} IO, price_range: {price_vol_range}, {price_change_range}]")) + 
+      theme_light() + 
+      theme(axis.text.y = element_text(size = 6))  
+      
+  ggsave(inflation_impact_plot_path, inflation_impact_plot)
+  
+  return(list(results_df, inflation_impact_plot))
+
+}
+
+ssp_comparison <- function(pre_results, inflation_results, 
+                           pre_year, inflation_year,
+                           output_path){
+  
+  # pre_results <- results50
+  # inflation_results <- results51
+  # pre_year <- 1950 
+  # inflation_year <- 1951
+  # output_path <- glue("{proj_root}/analysis/comparison-period/50-51")
+  # 
+  dir.create(output_path, recursive = T)
+  
+  results_joint <- 
+    left_join(
+      pre_results[[1]],
+      inflation_results[[1]],
+      by = "industry",
+      suffix = c(".pre", ".inflation")
+    )
+  
+  dot_compare_plt <- 
+    results_joint %>%
+    mutate(highlight = ifelse(impact_rank.pre <= 10, "T", "F")) %>%
+    pivot_longer(c(impact_rank.pre, impact_rank.inflation), names_to = "period") %>%
+    mutate(
+      period = str_replace(period, "impact_rank.", ""),
+      period = factor(period, levels = c("pre", "inflation"))
+      ) %>%
+    ggplot() + 
+    geom_point(aes(x = period, y = value)) +
+    geom_line(aes(x = period, y = value, group = industry)) + 
+    theme_light() + 
+    scale_y_reverse(breaks = scales::pretty_breaks(n = 20), 
+                    limits = c(nrow(results_joint), 1),
+                    expand = expansion(add = 0.5),
+                    ) + 
+    #scale_y_continuous(breaks = scales::pretty_breaks(n = 20)) + 
+    scale_x_discrete(expand = c(0.05, 0.05)) + 
+    ylab("impact rank") + 
+    labs(subtitle = "Comparison of impact ranks") 
+    #scale_fill_manual(values=c(T = "gold", F = "black"))  
+    #theme(legend.position = "none")
+  
+  joint_plot <- plot_grid(pre_results[[2]] + labs(subtitle = glue("SSP pre-{pre_year}")),
+                          inflation_results[[2]] + ylab("")  + labs(subtitle = glue("Sector Inflation Impact {pre_year} - {inflation_year}")),
+                          dot_compare_plt, nrow = 1, rel_widths = c(1, 1, 0.6))
+  
+  ggsave(glue("{output_path}/comparison_plot.png"), joint_plot, width = 14)
+
+}
+
+```
+
+```{r}
+
+results_path <- glue("{proj_root}/results/long_term/all_years")
+dir.create(results_path, recursive = T, showWarnings = F)
+
+for (analysis_year in 1948:1996){
+  
+  print(analysis_year)
+  
+  use_df <- 
+    read_csv(glue("{proj_root}/data/prepared/use/{analysis_year}.csv"), show_col_types = F)
+  make_df <- 
+    read_csv(glue("{proj_root}/data/prepared/make/{analysis_year}.csv"), show_col_types = F)
+  import_df <- 
+    read_csv(glue("{proj_root}/data/prepared/import/{analysis_year}.csv"), show_col_types = F)
+   total_industry_output_df <-
+     read_csv(glue("{proj_root}/data/prepared/total_industry_output/{analysis_year}.csv"), show_col_types = F)
+  total_commodity_output_df <- 
+    read_csv(glue("{proj_root}/data/prepared/total_commodity_output/{analysis_year}.csv"), show_col_types = F)
+  consumption_df <- 
+    read_csv(glue("{proj_root}/data/prepared/commodity_PCE/{analysis_year}.csv"), show_col_types = F)
+  consumption_import_df <- 
+    read_csv(glue("{proj_root}/data/prepared/commodity_PCE_import/{analysis_year}.csv"), show_col_types = F)
+  
+  industry_codes_df <- 
+    read_csv(glue("{proj_root}/data/prepared/industry_codes_1947.csv"), show_col_types = F)
+  price_index_df <- 
+    read_csv(glue("{proj_root}/data/prepared/price_index/price_index47.csv"), show_col_types = F)
+  exogenous_industry_codes <- c("211", "212", "52", "531", "532RL", "55", "722")
+  
+  if (analysis_year >= 1963){
+   
+    industry_codes_df <- 
+      read_csv(glue("{proj_root}/data/prepared/industry_codes_1963.csv"), show_col_types = F)
+    price_index_df <- 
+      read_csv(glue("{proj_root}/data/prepared/price_index/price_index63.csv"), show_col_types = F)
+    exogenous_industry_codes <- 
+       c("211", "212", "521CI", "523", "524", "525", "531", "532RL",
+         "55", "621", "622HO", "713", "722")
+    
+  }
+  
+  result <- 
+    perform_ssp_analysis(
+      analysis_year,
+      use_df,
+      make_df,
+      import_df,
+      industry_codes_df,
+      price_index_df,
+      total_industry_output_df,
+      total_commodity_output_df,
+      consumption_df,
+      consumption_import_df,
+      results_path, 
+      exogenous_industry_codes,
+      price_vol_range=0, 
+      price_change_range=1
+  )
+
+}
+
+```
+
+```{r}
+
+results_path <- glue("{proj_root}/results/long_term/all_years_agg47")
+dir.create(results_path, recursive = T, showWarnings = F)
+
+for (analysis_year in 1948:1996){
+  
+  print(analysis_year)
+
+  use_df <- 
+    read_csv(glue("{proj_root}/data/prepared/use/{analysis_year}.csv"), show_col_types = F)
+  make_df <- 
+    read_csv(glue("{proj_root}/data/prepared/make/{analysis_year}.csv"), show_col_types = F)
+  import_df <- 
+    read_csv(glue("{proj_root}/data/prepared/import/{analysis_year}.csv"), show_col_types = F)
+   total_industry_output_df <-
+     read_csv(glue("{proj_root}/data/prepared/total_industry_output/{analysis_year}.csv"), show_col_types = F)
+  
+  total_commodity_output_df <- 
+    read_csv(glue("{proj_root}/data/prepared/total_commodity_output/{analysis_year}.csv"), show_col_types = F)
+  consumption_df <- 
+    read_csv(glue("{proj_root}/data/prepared/commodity_PCE/{analysis_year}.csv"), show_col_types = F)
+  consumption_import_df <- 
+    read_csv(glue("{proj_root}/data/prepared/commodity_PCE_import/{analysis_year}.csv"), show_col_types = F)
+  
+  industry_codes_df <- 
+    read_csv(glue("{proj_root}/data/prepared/industry_codes_1947.csv"), show_col_types = F)
+  price_index_df <- 
+    read_csv(glue("{proj_root}/data/prepared/price_index/price_index47.csv"), show_col_types = F)
+  exogenous_industry_codes <- c("211", "212", "52", "531", "532RL", "55", "722")
+  
+  if (analysis_year >= 1963){
+    
+    
+  use_df <- 
+    read_csv(glue("{proj_root}/data/prepared/agg47_use/{analysis_year}.csv"), show_col_types = F)
+  make_df <- 
+    read_csv(glue("{proj_root}/data/prepared/agg47_make/{analysis_year}.csv"), show_col_types = F)
+  import_df <- 
+    read_csv(glue("{proj_root}/data/prepared/agg47_import/{analysis_year}.csv"), show_col_types = F)
+   total_industry_output_df <-
+     read_csv(glue("{proj_root}/data/prepared/agg47_total_industry_output/{analysis_year}.csv"), show_col_types = F)
+
+  # industry_codes_df <- 
+  #     read_csv(glue("{proj_root}/data/prepared/industry_codes_1963_matched.csv"), show_col_types = F) %>%
+  #     select(code_name = code_name_match47, code = code_match47, name = name_match47)
+   
+    # price_index_df <- 
+    #   read_csv(glue("{proj_root}/data/prepared/price_index/price_index63.csv"), show_col_types = F)
+    # exogenous_industry_codes <- 
+    #    c("211", "212", "521CI", "523", "524", "525", "531", "532RL",
+    #      "55", "621", "622HO", "713", "722")
+    
+  }
+  
+  result <- 
+    perform_ssp_analysis(
+      analysis_year,
+      use_df,
+      make_df,
+      import_df,
+      industry_codes_df,
+      price_index_df,
+      total_industry_output_df,
+      total_commodity_output_df,
+      consumption_df,
+      consumption_import_df,
+      results_path, 
+      exogenous_industry_codes,
+      price_vol_range=0, 
+      price_change_range=1
+  )
+
+}
+
+
+```
+
+```{r}
+
+glob_path <- glue("{proj_root}/results/long_term/all_years_agg47/*.csv")
+ssp_csvs <- Sys.glob(glob_path)
+ssp_dfs <- lapply(ssp_csvs, read_csv, show_col_types = F)
+ssp_df <- bind_rows(ssp_dfs)
+
+ranks_df <- 
+  ssp_df %>%
+  select(industry, impact_rank, year) 
+
+
+
+ranks_df %>%
+  ggplot(aes(industry, year, height = impact_rank, group = year)) + 
+  geom_ridgeline(fill = "lightblue")
+
+ranks_df %>%
+  filter(year <= 1960) %>%
+  mutate(impact_rank_lump = if_else(impact_rank < 11, impact_rank, 11)) %>%
+  ggplot(aes(x = year, y = impact_rank_lump, color = industry)) +
+  geom_bump(size = 1, smooth = 10) +
+  geom_point(size = 1) 
+
+
+ranks_df %>%
+  filter(year <= 1960) %>%
+  mutate(impact_rank_lump = if_else(impact_rank < 11, impact_rank, 11)) %>%
+  ggplot(aes(x = year, y = impact_rank_lump, color = industry)) +
+  geom_line() + 
+  geom_point()
+```
+
+

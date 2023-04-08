@@ -4,11 +4,6 @@ output: html_document
 date: "2023-01-20"
 ---
 
-still to do:
-figure out imports to remove from consumption vec
-make version of post 62 IO mats that match 1947 industries
-
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
@@ -40,7 +35,7 @@ use47_xlsx_ipath <- glue("{downloaded_data_path}/IOUse_Before_Redefinitions_PRO_
 use63_xlsx_ipath <- glue("{downloaded_data_path}/IOUse_Before_Redefinitions_PRO_1963-1996_Summary.xlsx")
 use97_xlsx_ipath <- glue("{downloaded_data_path}/IOUse_Before_Redefinitions_PRO_1997-2021_Summary.xlsx")
 
-import97_xlsx_ipath <- glue("{downloaded_data_path}/ImportMatrices_Before_Redefinitions_SUM_1997-2021.xlsx")
+#import97_xlsx_ipath <- glue("{downloaded_data_path}/ImportMatrices_Before_Redefinitions_SUM_1997-2021.xlsx")
 
 gross47_price_xlsx_ipath <- glue("{downloaded_data_path}/GDPbyInd_GO_1947-1997.xlsx")
 gross97_price_xlsx_ipath <- glue("{downloaded_data_path}/GrossOutput.xlsx")
@@ -132,25 +127,30 @@ fix_names <- function(df){
   
 }
 
-impute_import_mat <- function(use_df, use_row_trim_start, use_col_trim_end){
-  
-   trim_use_df <- 
-      use_df %>% 
-      slice(-(use_row_trim_start:nrow(.))) %>%
-      select(1:use_col_trim_end)
-  
+impute_import_domestic_supply <- function(row_trimmed_use_df){
+   
    import_pct_df <-
-      use_df %>%
-      slice(-(use_row_trim_start:nrow(.))) %>%
+      row_trimmed_use_df %>%
       arrange(commodity) %>%
       mutate(
         positive_imports = F050_Imports_of_goods_and_services > 0,
         # these commodities are not imported and are positive due to port value adjustments
-        domestic_supply = T007_Total_Commodity_Output + -1*(F050_Imports_of_goods_and_services) - F040_Exports_of_goods_and_services,
+        domestic_supply = Total_Commodity_Output + -1*(F050_Imports_of_goods_and_services) - F040_Exports_of_goods_and_services,
         import_pct_domestic_supply = -1*F050_Imports_of_goods_and_services/domestic_supply,
         import_pct_domestic_supply = if_else(positive_imports, 0, import_pct_domestic_supply)) %>%
       select(c(commodity, import_pct_domestic_supply))
+  
+}
 
+impute_import_mat <- function(use_df, use_col_trim_end){
+  
+   trim_use_df <- 
+      use_df %>% 
+      select(1:use_col_trim_end)
+  
+   import_pct_df <- 
+     impute_import_domestic_supply(use_df)
+   
     use_mat <- as.matrix(trim_use_df[,2:use_col_trim_end])
     import_pct_mat <- as.matrix(import_pct_df[, 2])[, rep(1, ncol(use_mat))]
     import_mat <- use_mat * import_pct_mat
@@ -162,6 +162,25 @@ impute_import_mat <- function(use_df, use_row_trim_start, use_col_trim_end){
       select(commodity, everything()) 
     
     return(import_df)
+}
+
+impute_import_PCE <- function(use_df){
+  
+  import_pct_df <- 
+     impute_import_domestic_supply(use_df)
+  
+  import_PCE_df <- 
+    use_df %>%
+    arrange(commodity) %>%
+    select(commodity, F010_Personal_consumption_expenditures) %>%
+    left_join(import_pct_df, by = "commodity") %>%
+    transmute(
+      commodity,
+      import_PCE = import_pct_domestic_supply * F010_Personal_consumption_expenditures
+    )
+  
+  return(import_PCE_df)
+  
 }
 
 aggregate_IO_table_industries <- function(
@@ -226,6 +245,7 @@ prepare_IO <- function(
     start_year, 
     end_year,
     make_total_ind_output_colname,
+    use_total_commodity_output_colname,
     use_row_trim_start,
     use_col_trim_end,
     make_skip_n = 5,
@@ -254,6 +274,7 @@ prepare_IO <- function(
   
     total_commodity_output_dir <- glue("{prepared_data_path}/total_commodity_output")
     consumption_output_dir <- glue("{prepared_data_path}/commodity_PCE")
+    consumption_import_output_dir <- glue("{prepared_data_path}/commodity_PCE_import")
 
     total_industry_output_dir <-
       glue("{prepared_data_path}/{output_prefix}total_industry_output")
@@ -261,12 +282,13 @@ prepare_IO <- function(
     use_output_dir <- glue("{prepared_data_path}/{output_prefix}use")
     import_output_dir <- glue("{prepared_data_path}/{output_prefix}import")
     
-    dir.create(total_commodity_output_dir)
-    dir.create(consumption_output_dir)
-    dir.create(total_industry_output_dir)
-    dir.create(make_output_dir)
-    dir.create(use_output_dir)
-    dir.create(import_output_dir)
+    dir.create(total_commodity_output_dir, showWarnings = F)
+    dir.create(consumption_output_dir, showWarnings = F)
+    dir.create(consumption_import_output_dir, showWarnings = F)
+    dir.create(total_industry_output_dir, showWarnings = F)
+    dir.create(make_output_dir, showWarnings = F)
+    dir.create(use_output_dir, showWarnings = F)
+    dir.create(import_output_dir, showWarnings = F)
   
     for (y in seq(start_year, end_year)){
       
@@ -274,6 +296,7 @@ prepare_IO <- function(
       total_industry_output_path <- glue("{total_industry_output_dir}/{y}.csv")
       make_output_path <- glue("{make_output_dir}/{y}.csv")
       consumption_output_path <- glue("{consumption_output_dir}/{y}.csv")
+      consumption_import_output_path <- glue("{consumption_import_output_dir}/{y}.csv")
       use_output_path <- glue("{use_output_dir}/{y}.csv")
       import_output_path <- glue("{import_output_dir}/{y}.csv")
       industry_codes_output_path <- glue("{prepared_data_path}/industry_codes_{start_year}.csv")
@@ -288,7 +311,8 @@ prepare_IO <- function(
         mutate(
           value = if_else(value == "...", "0", value),
           value = as.numeric(value)) %>%
-        pivot_wider(sector)
+        pivot_wider(sector) %>%
+        rename("Total_Industry_Output" = !!make_total_ind_output_colname)
       colnames(make_df)[1] <- "industry"
       
       # store industry codes, always unaggregated
@@ -312,7 +336,7 @@ prepare_IO <- function(
       # store totals
       make_df %>%
         slice(nrow(.)) %>%
-        select(-c(industry, !!make_total_ind_output_colname)) %>%
+        select(-c(industry, Total_Industry_Output)) %>%
         select(all_of(sort(colnames(.)))) %>% 
         pivot_longer(everything(), names_to = "commodity", values_to = "total_output") %>%
         write_csv(total_commodity_output_path)
@@ -320,13 +344,13 @@ prepare_IO <- function(
       make_df %>%
         arrange(industry) %>%
         slice(-nrow(.)) %>%
-        select(c(industry, !!make_total_ind_output_colname)) %>%
+        select(c(industry, Total_Industry_Output)) %>%
         write_csv(total_industry_output_path)
       
       # store matrix
       make_df %>%
         slice(-nrow(.)) %>%
-        select(-!!make_total_ind_output_colname) %>%
+        select(-Total_Industry_Output) %>%
         write_csv(make_output_path)
       
       # USE
@@ -337,8 +361,14 @@ prepare_IO <- function(
         mutate(
           value = if_else(value == "...", "0", value),
           value = as.numeric(value)) %>%
-        pivot_wider(sector)
+        pivot_wider(sector) %>%
+        rename("Total_Commodity_Output" = !!use_total_commodity_output_colname) %>%
+        slice(-(use_row_trim_start:nrow(.)))
       colnames(use_df)[1] <- "commodity"
+      
+      trim_use_df <- 
+        use_df %>% 
+        select(1:use_col_trim_end)
       
       #IMPORT - put here to use non-aggregated use if imputing
       if (!is.na(import_file_path)){
@@ -350,11 +380,12 @@ prepare_IO <- function(
           mutate(
             value = if_else(value == "...", "0", value),
             value = as.numeric(value)) %>%
-          pivot_wider(sector)
+          pivot_wider(sector) 
         colnames(import_df)[1] <- "commodity"
   
       } else {
-        import_df <- impute_import_mat(use_df, use_row_trim_start, use_col_trim_end)
+        import_df <- 
+          impute_import_mat(use_df, use_col_trim_end)
       }
       
       # aggregate industry if needed
@@ -365,26 +396,26 @@ prepare_IO <- function(
           aggregate_IO_table_industries(
             use_df, industry_code_aggregation_df, industries_as_cols = T)
         
+        trim_use_df <- 
+          aggregate_IO_table_industries(
+            trim_use_df, industry_code_aggregation_df, industries_as_cols = T)
+        
         import_df <- 
           aggregate_IO_table_industries(
             import_df, industry_code_aggregation_df, industries_as_cols = T)
       }
       
       import_df %>% write_csv(import_output_path)
+      trim_use_df %>% write_csv(use_output_path)
 
       # continue with use df
       use_df %>%
-        slice(-(use_row_trim_start:nrow(.))) %>%
         arrange(commodity) %>%
         select(c(commodity, F010_Personal_consumption_expenditures)) %>%
         write_csv(consumption_output_path)
       
-      trim_use_df <- 
-        use_df %>% 
-        slice(-(use_row_trim_start:nrow(.))) %>%
-        select(1:use_col_trim_end)
-      
-      trim_use_df %>% write_csv(use_output_path)
+      impute_import_PCE(use_df) %>%
+        write_csv(consumption_import_output_path)
       
     }
 
@@ -401,6 +432,7 @@ prepare_IO(
     1947, 
     1962,
     make_total_ind_output_colname = "T008_Total_Industry_Output",
+    use_total_commodity_output_colname = "T007_Total_Commodity_Output",
     use_row_trim_start = 50,
     use_col_trim_end = 48
     )
@@ -412,6 +444,7 @@ prepare_IO(
     1963, 
     1996,
     make_total_ind_output_colname = "T008_Total_Industry_Output",
+    use_total_commodity_output_colname = "T007_Total_Commodity_Output",
     use_row_trim_start = 68,
     use_col_trim_end = 66
     )
@@ -423,13 +456,11 @@ prepare_IO(
     1997, 
     2021,
     make_total_ind_output_colname = "Total_Industry_Output",
+    use_total_commodity_output_colname = "Total_Commodity_Output",
     use_row_trim_start = 68,
-    use_col_trim_end = 66,
-    import_file_path = import97_xlsx_ipath
+    use_col_trim_end = 66
     )
 
-
-# still the question of domestic consumption vector
 
 
 ```
@@ -525,6 +556,7 @@ prepare_IO(
     1963, 
     1996,
     make_total_ind_output_colname = "T008_Total_Industry_Output",
+    use_total_commodity_output_colname = "T007_Total_Commodity_Output",
     use_row_trim_start = 68,
     use_col_trim_end = 66,
     industry_code_aggregation_df = 
@@ -539,9 +571,9 @@ prepare_IO(
     1997, 
     2021,
     make_total_ind_output_colname = "Total_Industry_Output",
+    use_total_commodity_output_colname = "Total_Commodity_Output",
     use_row_trim_start = 68,
     use_col_trim_end = 66,
-    import_file_path = import97_xlsx_ipath,
     industry_code_aggregation_df = 
       mod_industry_codes97_df %>% select(c(code_name, code_name_match47)),
     output_prefix = "agg47_"
@@ -694,84 +726,4 @@ plot_missing_prices(mod_price97_df, glue("{price_index_path}/price_index97_missi
 plot_missing_prices(mod_price97_match47_df, glue("{price_index_path}/price_index97_match47_missing.png"))
 
 ```
-
-
-### Attempting to determine if post1997 imports imputation works as I expect it
-
-```{r eval=FALSE, include=FALSE}
-
-use_df <- 
-  read_xlsx(use97_xlsx_ipath, sheet = as.character(2000), skip = 5) %>%
-  fix_names() %>%
-  pivot_longer(-sector) %>%
-  mutate(
-    value = if_else(value == "...", "0", value),
-    value = as.numeric(value)) %>%
-  pivot_wider(sector)
-colnames(use_df)[1] <- "commodity"
-
-
-import_df <- 
-  read_xlsx(import97_xlsx_ipath, sheet = as.character(2000), skip = 5) %>%
-  fix_names() %>%
-  pivot_longer(-sector) %>%
-  mutate(
-    value = if_else(value == "...", "0", value),
-    value = as.numeric(value)) %>%
-  pivot_wider(sector) %>%
-  slice(1:73)
-colnames(import_df)[1] <- "commodity"
-
-
-import_mat <- 
-  import_df %>%
-  arrange(commodity) %>%
-  select(all_of(colnames(.)[2:(which(colnames(.) == "T001_Total_Intermediate") - 1)])) %>%
-  select(all_of(sort(colnames(.)))) %>%
-  as.matrix()
-
-use_mat <-
-  use_df %>%
-  slice(1:73) %>%
-  arrange(commodity) %>%
-  select(all_of(colnames(.)[2:(which(colnames(.) == "Total_Intermediate") - 1)])) %>%
-  select(all_of(sort(colnames(.)))) %>%
-  as.matrix()
-
-div_mat <- import_mat / use_mat
-
-
-use_c <- 
-  use_df %>% 
-  select(commodity, F010_Personal_consumption_expenditures) %>%
-  rename(use_c = F010_Personal_consumption_expenditures)
-
-import_c <- 
-  import_df %>% 
-  select(commodity,F010_Personal_consumption_expenditures) %>%
-  rename(import_c = F010_Personal_consumption_expenditures)
-
-
-join_df <- 
-  left_join(use_c, import_c, by = "commodity") %>%
-  mutate(frac_import = import_c/use_c)
-
-
-
-import_pct_df <-
-  use_df %>%
-  arrange(commodity) %>%
-  mutate(
-    positive_imports = F050_Imports_of_goods_and_services > 0,
-    # these commodities are not imported and are positive due to port value adjustments
-    domestic_supply = Total_Commodity_Output + -1*(F050_Imports_of_goods_and_services) - F040_Exports_of_goods_and_services,
-    import_pct_domestic_supply = -1*F050_Imports_of_goods_and_services/domestic_supply,
-    import_pct_domestic_supply = as.character(100*if_else(positive_imports, 0, import_pct_domestic_supply))) %>%
-  select(c(commodity, import_pct_domestic_supply, Total_Commodity_Output, F050_Imports_of_goods_and_services, domestic_supply, F040_Exports_of_goods_and_services))
-
-```
-
-
-
-
 

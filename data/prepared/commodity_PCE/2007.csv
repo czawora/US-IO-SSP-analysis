@@ -63,6 +63,6 @@ commodity,F010_Personal_consumption_expenditures
 721_Accommodation,101205
 722_Food_services_and_drinking_places,491147
 81_Other_services_except_government,471721
-GFE_Federal_government_enterprises,9915
 GFGD_Federal_general_government_defense,0
-GFGN_Federal_general_government_nondefense,0
+HS_Housing,1480166
+ORE_Other_real_estate,4773
