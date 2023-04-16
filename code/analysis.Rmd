@@ -4,6 +4,10 @@ output: html_document
 date: "`r Sys.Date()`"
 ---
   
+To Do:
+* Per-year SSP analysis showing existence and change in SSP over time
+* SSP analysis, both pre-latent and contemp, for inflations of interest
+  
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
@@ -13,8 +17,9 @@ library(tidyverse)
 library(readxl)
 library(glue)
 library(ggbump)
-library(ggridges)
 library(janitor)
+library(RColorBrewer)
+library(cowplot)
 
 here::i_am("code/analysis.Rmd")
 library(here)
@@ -22,8 +27,7 @@ library(here)
 proj_root <- here()
 ```
 
-# Per-year SSP analysis showing existence and change in SSP over time
-# SSP analysis, both pre-latent and contemp, for inflations of interest
+# Functions
 
 ```{r}
 
@@ -390,6 +394,7 @@ perform_ssp_analysis <- function(
   # PLOT
   inflation_impact_plot <- 
       results_df %>%
+      filter(!is.na(impact_total)) %>%
       arrange(desc(impact_total)) %>%
       mutate(
         name = str_replace_all(name, "_", " "),
@@ -413,58 +418,216 @@ perform_ssp_analysis <- function(
 
 }
 
-ssp_comparison <- function(pre_results, inflation_results, 
-                           pre_year, inflation_year,
-                           output_path){
+ssp_comparison_wrapper <- 
+  function(
+    analysis_year, results_path, 
+    price_vol_range = 0, price_change_range = 0
+  ){
   
-  # pre_results <- results50
-  # inflation_results <- results51
-  # pre_year <- 1950 
-  # inflation_year <- 1951
-  # output_path <- glue("{proj_root}/analysis/comparison-period/50-51")
-  # 
+  industry_codes_df <- 
+    read_csv(glue("{proj_root}/data/prepared/industry_codes_1947.csv"), show_col_types = F)
+  price_index_df <- 
+    read_csv(glue("{proj_root}/data/prepared/price_index/price_index47.csv"), show_col_types = F)
+  exogenous_industry_codes <- c("211", "212", "52", "531", "532RL", "55", "722")
+  
+  if (analysis_year > 1962){
+    
+    industry_codes_df <- 
+      read_csv(glue("{proj_root}/data/prepared/industry_codes_1963.csv"), show_col_types = F)
+    price_index_df <- 
+      read_csv(glue("{proj_root}/data/prepared/price_index/price_index63.csv"), show_col_types = F)
+    exogenous_industry_codes <- 
+      c("211", "212", "521CI", "523", "524", "525", "531", "532RL",
+        "55", "621", "622HO", "713", "722")
+  }
+  
+  use_df <- 
+    read_csv(glue("{proj_root}/data/prepared/use/{analysis_year}.csv"), show_col_types = F)
+  make_df <- 
+    read_csv(glue("{proj_root}/data/prepared/make/{analysis_year}.csv"), show_col_types = F)
+  import_df <- 
+    read_csv(glue("{proj_root}/data/prepared/import/{analysis_year}.csv"), show_col_types = F)
+   total_industry_output_df <-
+     read_csv(glue("{proj_root}/data/prepared/total_industry_output/{analysis_year}.csv"), show_col_types = F)
+  
+  total_commodity_output_df <- 
+    read_csv(glue("{proj_root}/data/prepared/total_commodity_output/{analysis_year}.csv"), show_col_types = F)
+  consumption_df <- 
+    read_csv(glue("{proj_root}/data/prepared/commodity_PCE/{analysis_year}.csv"), show_col_types = F)
+  consumption_import_df <- 
+    read_csv(glue("{proj_root}/data/prepared/commodity_PCE_import/{analysis_year}.csv"), show_col_types = F)
+  
+  results <- 
+    perform_ssp_analysis(
+      analysis_year,
+      use_df,
+      make_df,
+      import_df,
+      industry_codes_df,
+      price_index_df,
+      total_industry_output_df,
+      total_commodity_output_df,
+      consumption_df,
+      consumption_import_df,
+      results_path, 
+      exogenous_industry_codes,
+      price_vol_range=price_vol_range, 
+      price_change_range=price_change_range
+  )
+
+  return(results)
+  
+}
+
+ssp_comparison <- function(latent_results, inflation_results, 
+                           latent_year_str, inflation_year_str,
+                           output_path, smaller_title = F){
+  
   dir.create(output_path, recursive = T)
   
   results_joint <- 
     left_join(
-      pre_results[[1]],
-      inflation_results[[1]],
+      latent_results[[1]],
+      inflation_results[[1]] %>% select(-name),
       by = "industry",
       suffix = c(".pre", ".inflation")
+    ) %>%
+    mutate(
+      name = str_replace_all(name, "_", " "),
+      industry = glue("[{industry}]"),
+      code_name = glue("{name} {industry}")
+    ) %>%
+    filter(!is.na(impact_total.pre)) 
+  
+  consumption_plot_change <- 
+    results_joint %>%
+    mutate(      
+      code_name = fct_reorder(code_name, impact_total.inflation),
+      share_personal_consump.change = share_personal_consump.inflation - share_personal_consump.pre
+    ) %>%
+    ggplot() + 
+    geom_col(aes(x = share_personal_consump.change, y = code_name), fill = "darkgreen") + 
+    theme_light() + 
+    ylab("sector") +
+    xlab("Change in PCE Share") 
+  
+  fl_plot_change <- 
+    results_joint %>%
+    mutate(      
+      industry = fct_reorder(industry, impact_total.inflation),
+      fl.change = fl.inflation - fl.pre
+    ) %>%
+    ggplot() + 
+    geom_col(aes(x = fl.change, y = industry), fill = "purple") + 
+    theme_light() + 
+    ylab("sector") +
+    xlab("Change in Forward Linkages") 
+  
+  price_shock_change <- 
+    results_joint %>%
+    mutate(      
+      industry = fct_reorder(industry, impact_total.inflation),
+       price_shock_pct.change = price_shock_pct.inflation - price_shock_pct.pre
+    ) %>%
+    ggplot() + 
+    geom_col(aes(x = price_shock_pct.change, y = industry), fill = "gray") + 
+    theme_light() + 
+    ylab("sector") +
+    xlab("Change in Price Shock Percent") 
+
+  title <- 
+    ggdraw() + 
+    draw_label(
+      glue("Change in SSP component factors, latent SSP ({latent_year_str}) vs inflationary SSP ({inflation_year_str})"),
+    size = 18, x = 0, hjust = -0.25) +
+    theme(plot.margin = margin(0, 0, 0, 0))
+  
+  all_change_plot <- plot_grid(
+    consumption_plot_change, fl_plot_change, price_shock_change,
+    ncol = 3, rel_widths = c(1.8, 1, 1)
     )
+  
+  titled_all_change_plot <- plot_grid(
+    title, all_change_plot, ncol = 1, rel_heights = c(0.1, 1)
+    )
+  
+  ggsave(
+    glue("{output_path}/component_change.png"), 
+    titled_all_change_plot, width = 14, bg = "white"
+    )
+    
   
   dot_compare_plt <- 
     results_joint %>%
-    mutate(highlight = ifelse(impact_rank.pre <= 10, "T", "F")) %>%
+    mutate(
+      highlight = ifelse(impact_rank.pre <= 10 | impact_rank.inflation <= 10, "T", "F"),
+      alpha = ifelse(impact_rank.pre <= 10 | impact_rank.inflation <= 10, 1, 1)
+      ) %>%
     pivot_longer(c(impact_rank.pre, impact_rank.inflation), names_to = "period") %>%
     mutate(
       period = str_replace(period, "impact_rank.", ""),
       period = factor(period, levels = c("pre", "inflation"))
       ) %>%
     ggplot() + 
-    geom_point(aes(x = period, y = value)) +
-    geom_line(aes(x = period, y = value, group = industry)) + 
+    geom_point(aes(x = period, y = value, color = highlight, fill = highlight)) +
+    geom_line(aes(x = period, y = value, group = industry, color = highlight, size = highlight)) + 
     theme_light() + 
+    theme(
+      legend.position = "none",
+      plot.subtitle = element_text(size = 12)
+    ) + 
     scale_y_reverse(breaks = scales::pretty_breaks(n = 20), 
                     limits = c(nrow(results_joint), 1),
                     expand = expansion(add = 0.5),
                     ) + 
-    #scale_y_continuous(breaks = scales::pretty_breaks(n = 20)) + 
+    scale_size_manual(values = c("T" = 0.9, "F" = 0.5), breaks = c("T", "F")) + 
+    scale_color_manual(values = c("T" = "black", "F" = "gray"), breaks = c("T", "F")) + 
+    scale_fill_manual(values = c("T" = "black", "F" = "gray"), breaks = c("T", "F")) + 
     scale_x_discrete(expand = c(0.05, 0.05)) + 
     ylab("impact rank") + 
     labs(subtitle = "Comparison of impact ranks") 
-    #scale_fill_manual(values=c(T = "gold", F = "black"))  
-    #theme(legend.position = "none")
+
+  latent_ssp_plot <- 
+    latent_results[[2]] + 
+    labs(subtitle = glue("Latent SSP {latent_year_str}")) + 
+    theme(plot.subtitle = element_text(size = 12))
   
-  joint_plot <- plot_grid(pre_results[[2]] + labs(subtitle = glue("SSP pre-{pre_year}")),
-                          inflation_results[[2]] + ylab("")  + labs(subtitle = glue("Sector Inflation Impact {pre_year} - {inflation_year}")),
-                          dot_compare_plt, nrow = 1, rel_widths = c(1, 1, 0.6))
+  inflationary_period_ssp_plot <- 
+    inflation_results[[2]] + 
+    ylab("") + 
+    labs(subtitle = glue("Inflationary Period SSP {inflation_year_str}")) + 
+    theme(plot.subtitle = element_text(size = 12))
   
-  ggsave(glue("{output_path}/comparison_plot.png"), joint_plot, width = 14)
+  if (smaller_title){
+    latent_ssp_plot <- 
+      latent_ssp_plot + 
+      theme(plot.subtitle = element_text(size = 10))
+    
+    inflationary_period_ssp_plot <- 
+      inflationary_period_ssp_plot + 
+      theme(plot.subtitle = element_text(size = 10)) 
+    
+    dot_compare_plt <- 
+      dot_compare_plt + 
+      theme(plot.subtitle = element_text(size = 10))
+  }
+  
+  joint_plot <- plot_grid(
+    latent_ssp_plot,
+    inflationary_period_ssp_plot,
+    dot_compare_plt, 
+    nrow = 1, rel_widths = c(1, 1, 0.6))
+  
+  
+  ggsave(glue("{output_path}/compare_ssp.png"), joint_plot, width = 14, bg = "white")
 
 }
 
 ```
+
+# Long Period Analysis
+
+## Disaggregated
 
 ```{r}
 
@@ -529,6 +692,8 @@ for (analysis_year in 1948:1996){
 }
 
 ```
+
+## Aggregated
 
 ```{r}
 
@@ -608,6 +773,8 @@ for (analysis_year in 1948:1996){
 
 ```
 
+## Plotting
+
 ```{r}
 
 glob_path <- glue("{proj_root}/results/long_term/all_years_agg47/*.csv")
@@ -617,28 +784,261 @@ ssp_df <- bind_rows(ssp_dfs)
 
 ranks_df <- 
   ssp_df %>%
-  select(industry, impact_rank, year) 
+  select(industry, name, impact_rank, year, impact_total) 
+
+```
+
+### Line Plot
+
+```{r}
+
+industry_impact_var_df <- 
+  ranks_df %>%
+  group_by(industry) %>%
+  summarise(impact_var = var(impact_total)) %>%
+  arrange(desc(impact_var)) %>%
+  mutate(var_rank = row_number())
+
+industry_impact_var_top <- 
+  industry_impact_var_df %>%
+  arrange(desc(impact_var)) %>%
+  slice_head(n = 10) %>%
+  pull(industry)
+
+impact_line_plot_df <- 
+  ranks_df %>%
+  left_join(industry_impact_var_df, by = "industry") %>%
+  mutate(
+    name = str_replace_all(name, "_", " "),
+    code_name = glue("{name} [{industry}]"),
+    impact_var_lump = if_else(var_rank < 11, code_name, "Other"), 
+    alpha = if_else(var_rank < 11, 1, 0.5),
+  ) 
+
+impact_line_plot_cat <- 
+  impact_line_plot_df %>%
+  filter(impact_var_lump != "Other") %>%
+  pull(impact_var_lump) %>% 
+  unique() %>%
+  sort()
+
+impact_line_plot_cat <- c(impact_line_plot_cat, "Other")
+
+c25 <- c(
+  "dodgerblue2", "#E31A1C", # red
+  "green4",
+  "#6A3D9A", # purple
+  "#FF7F00", # orange
+  "gold1",
+  "skyblue2", "#FB9A99", # lt pink
+  "palegreen2",
+  "#CAB2D6", # lt purple
+  "#FDBF6F", # lt orange
+  "gray70", "khaki2",
+  "maroon", "orchid1", "deeppink1", "blue1", "steelblue4",
+  "darkturquoise", "green1", "yellow4", "yellow3",
+  "darkorange4", "brown"
+)
+
+industry_palette <- c25[1:(length(impact_line_plot_cat) - 1)]
+industry_palette <- c(industry_palette, "black")
+names(industry_palette) <- impact_line_plot_cat
+
+impact_line_plot <- 
+  impact_line_plot_df %>%
+  ggplot() + 
+  geom_line(aes(x = year, y = impact_total, group = industry, color = impact_var_lump, alpha = alpha), linewidth = 1) + 
+  scale_alpha(guide = 'none') + 
+  theme_minimal() +
+  theme(
+    legend.position="bottom", 
+    legend.text=element_text(size=7)
+  ) + 
+  scale_colour_manual(name = "Industry Sector", values = industry_palette) + 
+  xlab("Year") + 
+  ylab("Total Inflation Impact") + 
+  labs(
+    title = "Sector Inflation Impact Varies Over Time",
+    subtitle = "Inflation Impact of each Sector Calculated With Yearly Price Change, IO Tables, and Consumption Vector\nSectors with Greatest Impact Variability Are Highlighted"
+    )
+
+ggsave(glue("{proj_root}/results/long_term/impact_line_plot.png"), impact_line_plot, width = 10, bg = "white")
+
+```
+
+### Dot Plot
+
+```{r}
+
+impact_dot_df <- 
+  ranks_df %>%
+  filter(impact_rank <= 10) %>%
+  group_by(industry) %>%
+  mutate(
+    impact_total_fct = case_when(
+      impact_total < 0 ~ "< 0%",
+      impact_total < 1 ~ "0-1%",
+      impact_total < 2 ~ "1-2%",
+      impact_total < 3 ~ "2-3%",
+      TRUE ~ "> 3%"
+    ),
+    name = str_replace_all(name, "_", " "),
+    industry = glue("[{industry}]"),
+    #industry = str_pad(industry, 10),
+    code_name = glue("{name}  {industry}"),
+    year_diff = year - lag(year) - 1,
+    ssp_run = NA
+  ) %>%
+  arrange(industry, year)
+
+ssp_run_id <- 0
+for (i in 1:nrow(impact_dot_df)){
+  if (is.na(impact_dot_df$year_diff[i]) || impact_dot_df$year_diff[i] != 0){
+    ssp_run_id <- ssp_run_id + 1
+    impact_dot_df$ssp_run[i] <- ssp_run_id
+  } else {
+    impact_dot_df$ssp_run[i] <- ssp_run_id
+  }
+}
+
+pal <- rev(heat.colors(5))
+pal <- brewer.pal(9, "Greys")
+#pal <- pal[seq(2, 8, by = 3)]
+pal <- pal[c(4, 6, 8)]
+#names(pal) <- c("< 0%", "0-1%", "1-2%", "2-3%", "> 3%")
+names(pal) <- c("0-1%", "1-2%", "2-3%")
+
+impact_dot_plot <- 
+  impact_dot_df %>%
+  ggplot() + 
+  geom_line(aes(x = year, y = code_name, group = ssp_run)) + 
+  geom_point(aes(x = year, y = code_name, size = impact_total_fct, color = impact_total_fct)) + 
+  theme_minimal() + 
+  scale_size_manual(
+    name = "Total Inflation Impact",
+    values = c("0-1%"=2, "1-2%"=3, "2-3%"=4),
+    breaks = c("0-1%", "1-2%", "2-3%")
+  ) + 
+  scale_color_manual(
+    name = "Total Inflation Impact",
+    values = pal,
+    breaks = c("0-1%", "1-2%", "2-3%")
+  ) + 
+  xlab("Year") + 
+  ylab("Sector") + 
+  labs(
+    title = "Several Sectors Remain Top Inflation Impact Sectors Over Decades",
+    subtitle = "Top 10 Highest Inflation Impact Sector Selected for Each Year"
+    )
+
+ggsave(glue("{proj_root}/results/long_term/impact_dot_plot.png"), impact_dot_plot, bg = "white", width = 12)
+
+```
+
+# Period Analysis 
+
+## analyses 47-62
+
+```{r message=FALSE, warning=FALSE}
+
+analysis_year <- 1950
+results_path <- glue("{proj_root}/results/period/SSP-vol")
+results50 <- ssp_comparison_wrapper(analysis_year, results_path, price_vol_range=3)
+
+analysis_year <- 1951
+results_path <- glue("{proj_root}/results/period/SSP-change")
+results51 <- ssp_comparison_wrapper(analysis_year, results_path, price_change_range=1)
+ 
+analysis_year <- 1955
+results_path <- glue("{proj_root}/results/period/SSP-vol")
+results55 <- ssp_comparison_wrapper(analysis_year, results_path, price_vol_range=8)
+  
+analysis_year <- 1958
+results_path <- glue("{proj_root}/results/period/SSP-change")
+results58 <- ssp_comparison_wrapper(analysis_year, results_path, price_change_range=2)
+
+ssp_comparison(results50, results51, "1947-1950", "1950-1951", glue("{proj_root}/results/period/50-51"))
+
+ssp_comparison(results55, results58, "1947-1955", "1956-1958", glue("{proj_root}/results/period/56-58"))
+
+```
+
+## analyses 63-96
+
+```{r message=FALSE, warning=FALSE}
+
+analysis_year <- 1966
+results_path <- glue("{proj_root}/results/period/SSP-vol")
+results66 <- ssp_comparison_wrapper(analysis_year, results_path, price_vol_range=3)
+
+analysis_year <- 1970
+results_path <- glue("{proj_root}/results/period/SSP-change")
+results70 <- ssp_comparison_wrapper(analysis_year, results_path, price_change_range=3)
+
+analysis_year <- 1973
+results_path <- glue("{proj_root}/results/period/SSP-vol")
+results73 <- ssp_comparison_wrapper(analysis_year, results_path, price_vol_range=10)
+
+analysis_year <- 1975
+results_path <- glue("{proj_root}/results/period/SSP-change")
+results75 <-ssp_comparison_wrapper(analysis_year, results_path, price_change_range = 2)
+
+analysis_year <- 1977
+results_path <- glue("{proj_root}/results/period/SSP-vol")
+results77 <- ssp_comparison_wrapper(analysis_year, results_path, price_vol_range=14)
+
+analysis_year <- 1980
+results_path <- glue("{proj_root}/results/period/SSP-change")
+results80 <- ssp_comparison_wrapper(analysis_year, results_path, price_change_range = 2)
+
+ssp_comparison(results66, results70, "1963-1966", "1967-1970", glue("{proj_root}/results/period/67-70"), smaller_title = T)
+
+ssp_comparison(results73, results75, "1963-1973", "1973-1975", glue("{proj_root}/results/period/73-75"), smaller_title = T)
+
+ssp_comparison(results77, results80, "1963-1977", "1978-1980", glue("{proj_root}/results/period/78-80"), smaller_title = T)
+
+```
 
 
+```{r}
 
-ranks_df %>%
-  ggplot(aes(industry, year, height = impact_rank, group = year)) + 
-  geom_ridgeline(fill = "lightblue")
+file.copy(
+  glue("{proj_root}/results/long_term/impact_line_plot.png"),
+  glue("{proj_root}/results/publish/fig01-impact_line_plot.png"),
+  overwrite = T
+)
 
-ranks_df %>%
-  filter(year <= 1960) %>%
-  mutate(impact_rank_lump = if_else(impact_rank < 11, impact_rank, 11)) %>%
-  ggplot(aes(x = year, y = impact_rank_lump, color = industry)) +
-  geom_bump(size = 1, smooth = 10) +
-  geom_point(size = 1) 
+file.copy(
+  glue("{proj_root}/results/long_term/impact_dot_plot.png"),
+  glue("{proj_root}/results/publish/fig02-impact_dot_plot.png"),
+  overwrite = T
+)
 
+years <- c(
+  "50-51", "56-58", "67-70", "73-75", "78-80"
+)
 
-ranks_df %>%
-  filter(year <= 1960) %>%
-  mutate(impact_rank_lump = if_else(impact_rank < 11, impact_rank, 11)) %>%
-  ggplot(aes(x = year, y = impact_rank_lump, color = industry)) +
-  geom_line() + 
-  geom_point()
+i <- 3
+for (y in years){
+  istr <- str_pad(as.character(i), 2, pad = "0")
+  file.copy(
+    glue("{proj_root}/results/period/{y}/compare_ssp.png"),
+    glue("{proj_root}/results/publish/fig{istr}-{y}-compare_ssp.png"),
+    overwrite = T
+  )
+  i <- i + 1
+}
+
+for (y in years){
+  istr <- str_pad(as.character(i), 2, pad = "0")
+  file.copy(
+    glue("{proj_root}/results/period/{y}/component_change.png"),
+    glue("{proj_root}/results/publish/fig{istr}-{y}-component_change.png"),
+    overwrite = T
+  )
+  i <- i + 1
+}
+
 ```
 
 
