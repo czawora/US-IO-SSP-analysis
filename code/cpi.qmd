@@ -1,0 +1,158 @@
+---
+title: "plot"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(readxl)
+library(glue)
+library(cowplot)
+
+here::i_am("code/cpi.qmd")
+library(here)
+```
+
+```{r}
+proj_root <- here()
+
+downloaded_data_path <- glue("{proj_root}/data/download/CPI")
+cpi_yoy_ipath <- glue("{downloaded_data_path}/SeriesReport-20230202202310_ae3d60.xlsx")
+cpi_index_ipath <- glue("{downloaded_data_path}/SeriesReport-20230202202246_6b3a71.xlsx")
+
+output_path <- glue("{proj_root}/results/CPI/CPI.png")
+```
+
+```{r}
+
+cpi_yoy_df <- 
+  read_xlsx(cpi_yoy_ipath, skip = 11) %>%
+  group_by(Year) %>%
+  mutate(
+    month = row_number(),
+    date = ym(glue("{Year}_{month}"))
+    ) %>%
+  filter(!is.na(date) & Year >= 1945) %>%
+  ungroup() %>%
+  select(yoy_irate = Value, date)
+
+cpi_annualized_mom_df <- 
+  read_xlsx(cpi_index_ipath, skip = 11) %>%
+  mutate(
+    annualized_mom_irate = ((Value/lag(Value))^12 - 1) * 100
+  ) %>%
+  filter(!is.na(date) & Year >= 1945) %>%
+  group_by(Year) %>%
+  mutate(
+    month = row_number(),
+    date = ym(glue("{Year}_{month}"))
+    ) %>%
+  ungroup() %>%
+  select(Year, date, annualized_mom_irate)
+
+joint_irate_df <- 
+  left_join(cpi_annualized_mom_df, cpi_yoy_df, by = "date") %>%
+  pivot_longer(-c(date, Year), names_to = "irate")
+
+p1_plt_df <- 
+  joint_irate_df %>%
+  filter(Year <= 1971 & Year >= 1947) 
+
+p2_plt_df <- 
+  joint_irate_df %>%
+  filter(Year > 1971 & Year <= 1996) 
+
+p1_plt <-
+  ggplot() + 
+  geom_line(
+    data = p1_plt_df %>% filter(irate == "annualized_mom_irate"), 
+    aes(x = date, y = value), alpha = 0.2
+    ) +
+  geom_line(
+    data = p1_plt_df %>% filter(irate == "yoy_irate"), 
+    aes(x = date, y = value), linewidth = 1
+    ) +
+  geom_rect(
+    aes(xmin=ym("1950-01"), xmax=ym("1951-01"), ymin=-Inf, ymax=Inf),
+    alpha = 0.3
+    ) + 
+  geom_rect(
+    aes(xmin=ym("1956-01"), xmax=ym("1958-01"), ymin=-Inf, ymax=Inf),
+    alpha = 0.3
+    ) + 
+  geom_rect(
+    aes(xmin=ym("1967-01"), xmax=ym("1970-01"), ymin=-Inf, ymax=Inf),
+    alpha = 0.3
+    ) + 
+  geom_hline(aes(yintercept = 0)) + 
+  geom_hline(aes(yintercept = 2), color = "red", linetype = "dashed") + 
+  scale_x_date(breaks = scales::pretty_breaks(n = 20), expand = c(0,0)) + 
+  ylab("% change in CPI") + 
+  xlab("") + 
+  theme_minimal()
+
+p2_plt <-
+  ggplot() + 
+  geom_line(
+    data = p2_plt_df %>% filter(irate == "annualized_mom_irate"), 
+    aes(x = date, y = value), alpha = 0.2
+    ) +
+  geom_line(
+    data = p2_plt_df %>% filter(irate == "yoy_irate"), 
+    aes(x = date, y = value), linewidth = 1
+    ) +
+  geom_rect(
+    aes(xmin=ym("1973-01"), xmax=ym("1975-01"), ymin=-Inf, ymax=Inf),
+    alpha = 0.3
+    ) + 
+  geom_rect(
+    aes(xmin=ym("1978-01"), xmax=ym("1980-01"), ymin=-Inf, ymax=Inf),
+    alpha = 0.3
+    ) + 
+  geom_hline(aes(yintercept = 0)) + 
+  geom_hline(aes(yintercept = 2), color = "red", linetype = "dashed") + 
+  scale_x_date(breaks = scales::pretty_breaks(n = 20), expand = c(0,0)) + 
+  ylab("% change in CPI") + 
+  theme_minimal()
+
+
+plist <- lapply(list(p1_plt, p2_plt), 
+                function(p) 
+                  p + scale_y_continuous(limits = c(-10, 30), 
+                                         breaks = scales::pretty_breaks(n = 10), 
+                                         minor_breaks = NULL)
+                )
+
+(p <- plot_grid(plotlist = plist, align = "hv", axis = "l", ncol = 1))
+
+title <- 
+  ggdraw() + 
+  draw_label(
+    glue("% Change in CPI - 12 month (bold) and annualized monthly rates"),
+  size = 18, x = 0, hjust = -0.17) +
+  theme(plot.margin = margin(0, 0, 0, 0))
+
+caption <- 
+  ggdraw() + 
+  draw_label(
+    glue("(Shaded regions indicate inflationary periods analyzed)"),
+  size = 10, x = 0, hjust = -0.1) +
+  theme(plot.margin = margin(0, 0, 0, 0))
+ 
+titled_p <- plot_grid(
+    title, p, caption, ncol = 1, rel_heights = c(0.1, 1, 0.1)
+    )
+
+ggsave(output_path, titled_p, bg = "white", width = 10)
+  
+```
+
+```{r}
+file.copy(
+  glue("{proj_root}/results/CPI/CPI.png"),
+  glue("{proj_root}/results/publish/fig01-CPI.png"),
+  overwrite = T
+)
+```

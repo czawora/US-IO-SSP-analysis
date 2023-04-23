@@ -399,19 +399,37 @@ perform_ssp_analysis <- function(
       mutate(
         name = str_replace_all(name, "_", " "),
         num = str_pad(row_number(), 2, "left", "0"),
-        name = glue("{name} [{num}]")
+        name = glue("{name} | {num}")
         ) %>%
       ggplot() + 
-      geom_col(aes(x = impact_total, y = fct_reorder(name, impact_total)), 
-               color = "darkblue", fill = "darkblue", width = 0.4) + 
-      geom_col(aes(x = impact_dir, y = fct_reorder(name, impact_total)), 
-               color = "gold", fill = "gold", width = 0.4) +
+      geom_col(aes(x = impact_total, y = fct_reorder(name, impact_total), 
+                   fill = "Indirect", color = "Indirect"), 
+               width = 0.4) + 
+      geom_col(aes(x = impact_dir, y = fct_reorder(name, impact_total),
+                   fill = "Direct", color = "Direct"), 
+               width = 0.4) +
       ylab("industry") + 
       xlab("inflation impact (%)") + 
       labs(subtitle = glue("Inflation Impact [{analysis_year} IO, price_range: {price_vol_range}, {price_change_range}]")) + 
       theme_light() + 
-      theme(axis.text.y = element_text(size = 6))  
-      
+      theme(
+        axis.text.y = element_text(size = 6),
+        legend.position="top",
+        legend.key.height= unit(0.25, 'cm'),
+        legend.key.width= unit(0.65, 'cm'),
+        legend.margin=margin(t = 0, unit='cm')
+      ) +
+      scale_fill_manual(
+        name = "",
+        values = c("Indirect" = "darkblue", "Direct" = "gold"),
+        breaks = c("Indirect", "Direct")
+      ) + 
+      scale_color_manual(
+        guide = "none",
+        values = c("Indirect" = "darkblue", "Direct" = "gold"),
+        breaks = c("Indirect", "Direct")
+      ) 
+
   ggsave(inflation_impact_plot_path, inflation_impact_plot)
   
   return(list(results_df, inflation_impact_plot))
@@ -566,7 +584,8 @@ ssp_comparison <- function(latent_results, inflation_results,
     pivot_longer(c(impact_rank.pre, impact_rank.inflation), names_to = "period") %>%
     mutate(
       period = str_replace(period, "impact_rank.", ""),
-      period = factor(period, levels = c("pre", "inflation"))
+      period = if_else(period == "pre", "pre-inflation", period),
+      period = factor(period, levels = c("pre-inflation", "inflation"))
       ) %>%
     ggplot() + 
     geom_point(aes(x = period, y = value, color = highlight, fill = highlight)) +
@@ -784,7 +803,9 @@ ssp_df <- bind_rows(ssp_dfs)
 
 ranks_df <- 
   ssp_df %>%
-  select(industry, name, impact_rank, year, impact_total) 
+  select(industry, name, impact_rank, 
+         year, impact_total, share_personal_consump, 
+         rank_fl, price_shock_pct) 
 
 ```
 
@@ -935,6 +956,78 @@ ggsave(glue("{proj_root}/results/long_term/impact_dot_plot.png"), impact_dot_plo
 
 ```
 
+### Top SSP Component Plot
+
+```{r}
+
+stable_SSP_industry <- c("52", "311FT", "722", "62", "81", "531", "44RT")
+
+top_SSP_component_df <- 
+  ranks_df %>%
+  filter(industry %in% stable_SSP_industry) %>%
+  mutate(
+    name = str_replace_all(name, "_", " "),
+    industry = glue("[{industry}]"),
+    code_name = glue("{name}  {industry}")
+  ) %>%
+  pivot_longer(c(share_personal_consump, price_shock_pct, rank_fl), names_to = "var") 
+
+component_median_df <- 
+  ranks_df %>%
+  filter(!(industry %in% stable_SSP_industry)) %>%
+  pivot_longer(c(share_personal_consump, price_shock_pct, rank_fl), names_to = "var") %>%
+  group_by(year, var) %>%
+  summarise(median_val = median(value, na.rm = T))
+
+var_df <- 
+  tibble(
+    var = c("price_shock_pct", "share_personal_consump", "rank_fl"),
+    title = c("Price Change (%)", "Share of Personal Consumption", "Forward Linkages (Rank)")
+  )
+
+plotlists <- list()
+for (i in 1:nrow(var_df)){
+  
+  ivar <- var_df$var[i]
+  ititle <- var_df$title[i]
+  
+  plotlists[[i]] <- 
+    top_SSP_component_df %>%
+    filter(var == ivar) %>%
+    ggplot() + 
+    geom_line(aes(x = year, y = value)) + 
+    facet_grid(cols = vars(name)) + 
+    theme_minimal() + 
+    theme(strip.text.x = element_text(size = 8, color = "#333333")) + 
+    labs(title = ititle) + 
+    xlab("")
+  
+  if (i == 3){
+     plotlists[[i]] <-
+      plotlists[[i]] + scale_y_reverse() +
+       ylab("rank")
+  }
+    
+  if (i != 3){
+    plotlists[[i]] <-
+      plotlists[[i]] +
+      ylab("%") +
+      geom_line(
+        data = component_median_df %>% filter(var == ivar),
+        aes(x = year, y = median_val),
+        color = "red"
+      ) + 
+      labs(title = glue("{ititle} - red line indicates median value for other sectors"))
+  }
+  
+}
+
+top_SSP_component_plot <- plot_grid(plotlist = plotlists, ncol = 1)
+ggsave(glue("{proj_root}/results/long_term/top_SSP_components.png"), top_SSP_component_plot, bg = "white", width = 18)
+  
+```
+
+
 # Period Analysis 
 
 ## analyses 47-62
@@ -999,26 +1092,34 @@ ssp_comparison(results77, results80, "1963-1977", "1978-1980", glue("{proj_root}
 
 ```
 
+# Copy 
 
 ```{r}
 
 file.copy(
   glue("{proj_root}/results/long_term/impact_line_plot.png"),
-  glue("{proj_root}/results/publish/fig01-impact_line_plot.png"),
+  glue("{proj_root}/results/publish/fig02-impact_line_plot.png"),
   overwrite = T
 )
 
 file.copy(
   glue("{proj_root}/results/long_term/impact_dot_plot.png"),
-  glue("{proj_root}/results/publish/fig02-impact_dot_plot.png"),
+  glue("{proj_root}/results/publish/fig03-impact_dot_plot.png"),
   overwrite = T
 )
+
+file.copy(
+  glue("{proj_root}/results/long_term/top_SSP_components.png"),
+  glue("{proj_root}/results/publish/fig04-top_SSP_components.png"),
+  overwrite = T
+)
+
 
 years <- c(
   "50-51", "56-58", "67-70", "73-75", "78-80"
 )
 
-i <- 3
+i <- 5
 for (y in years){
   istr <- str_pad(as.character(i), 2, pad = "0")
   file.copy(
