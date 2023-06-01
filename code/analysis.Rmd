@@ -20,6 +20,7 @@ library(ggbump)
 library(janitor)
 library(RColorBrewer)
 library(cowplot)
+library(gt)
 
 here::i_am("code/analysis.Rmd")
 library(here)
@@ -27,7 +28,7 @@ library(here)
 proj_root <- here()
 ```
 
-# Functions
+## Functions
 
 ```{r}
 
@@ -380,6 +381,7 @@ perform_ssp_analysis <- function(
     separate(industry, c("industry", "name"), "_", extra = "merge") %>%
     arrange(desc(impact_total)) %>%
     mutate(
+      name = if_else(name == "Federal_Reserve_banks_credit_intermediation_and_related_activities", "Federal_Reserve_banks_credit_intermediation", name),
       year = analysis_year,
       price_shock_pct = price_shock_pct * 100, 
       share_personal_consump = share_personal_consump *100,
@@ -446,7 +448,7 @@ ssp_comparison_wrapper <-
     read_csv(glue("{proj_root}/data/prepared/industry_codes_1947.csv"), show_col_types = F)
   price_index_df <- 
     read_csv(glue("{proj_root}/data/prepared/price_index/price_index47.csv"), show_col_types = F)
-  exogenous_industry_codes <- c("211", "212", "52", "531", "532RL", "55", "722")
+  exogenous_industry_codes <- c("211", "212", "52", "531", "532RL", "55", "62", "722")
   
   if (analysis_year > 1962){
     
@@ -494,6 +496,51 @@ ssp_comparison_wrapper <-
   )
 
   return(results)
+  
+}
+
+
+cropped_impact_plot <- function(results_df){
+  
+   inflation_impact_plot <- 
+      results_df %>%
+      filter(!is.na(impact_total)) %>%
+      filter(impact_rank <= 15) %>%
+      arrange(desc(impact_total)) %>%
+      mutate(
+        name = str_replace_all(name, "_", " "),
+        num = str_pad(row_number(), 2, "left", "0"),
+        name = glue("{name} | {num}")
+        ) %>%
+      ggplot() + 
+      geom_col(aes(x = impact_total, y = fct_reorder(name, impact_total), 
+                   fill = "Indirect", color = "Indirect"), 
+               width = 0.4) + 
+      geom_col(aes(x = impact_dir, y = fct_reorder(name, impact_total),
+                   fill = "Direct", color = "Direct"), 
+               width = 0.4) +
+      ylab("industry") + 
+      xlab("inflation impact (%)") + 
+      theme_light() + 
+      theme(
+        axis.text.y = element_text(size = 8),
+        legend.position="top",
+        legend.key.height= unit(0.25, 'cm'),
+        legend.key.width= unit(0.65, 'cm'),
+        legend.margin=margin(t = 0, unit='cm')
+      ) +
+      scale_fill_manual(
+        name = "",
+        values = c("Indirect" = "darkblue", "Direct" = "gold"),
+        breaks = c("Indirect", "Direct")
+      ) + 
+      scale_color_manual(
+        guide = "none",
+        values = c("Indirect" = "darkblue", "Direct" = "gold"),
+        breaks = c("Indirect", "Direct")
+      ) 
+
+  return(inflation_impact_plot)
   
 }
 
@@ -593,7 +640,8 @@ ssp_comparison <- function(latent_results, inflation_results,
     theme_light() + 
     theme(
       legend.position = "none",
-      plot.subtitle = element_text(size = 12)
+      plot.title = element_text(size = 12),
+      plot.subtitle = element_text(size = 8, color = "#566573")
     ) + 
     scale_y_reverse(breaks = scales::pretty_breaks(n = 20), 
                     limits = c(nrow(results_joint), 1),
@@ -604,7 +652,7 @@ ssp_comparison <- function(latent_results, inflation_results,
     scale_fill_manual(values = c("T" = "black", "F" = "gray"), breaks = c("T", "F")) + 
     scale_x_discrete(expand = c(0.05, 0.05)) + 
     ylab("impact rank") + 
-    labs(subtitle = "Comparison of impact ranks") 
+    labs(title = "Comparison of impact ranks", subtitle = "Black lines highlight top ten ranked\nindustries in either period") 
 
   latent_ssp_plot <- 
     latent_results[[2]] + 
@@ -628,7 +676,11 @@ ssp_comparison <- function(latent_results, inflation_results,
     
     dot_compare_plt <- 
       dot_compare_plt + 
-      theme(plot.subtitle = element_text(size = 10))
+      theme(      
+        plot.title = element_text(size = 10),
+        plot.subtitle = element_text(size = 8, color = "#566573")
+      )
+    
   }
   
   joint_plot <- plot_grid(
@@ -637,14 +689,88 @@ ssp_comparison <- function(latent_results, inflation_results,
     dot_compare_plt, 
     nrow = 1, rel_widths = c(1, 1, 0.6))
   
-  
   ggsave(glue("{output_path}/compare_ssp.png"), joint_plot, width = 14, bg = "white")
+  
+  # cropped versions
+  
+  cropped_latent_ssp_plot <- 
+    cropped_impact_plot(latent_results[[1]]) + 
+    labs(subtitle = glue("Latent SSP {latent_year_str}")) + 
+    theme(plot.subtitle = element_text(size = 12))
+  
+  #ggsave(glue("{output_path}/cropped_latent_ssp.png"), cropped_latent_ssp_plot, width = 7, bg = "white")
+  
+  cropped_inflationary_period_ssp_plot <- 
+    cropped_impact_plot(inflation_results[[1]]) + 
+    labs(subtitle = glue("Inflationary Period SSP {inflation_year_str}")) + 
+    theme(plot.subtitle = element_text(size = 12))
+  
+  #ggsave(glue("{output_path}/cropped_inflationary_ssp.png"), cropped_inflationary_period_ssp_plot, width = 7, bg = "white")
+  
+  cropped_dot_compare_plt <- 
+    results_joint %>%
+    filter(impact_rank.pre <= 15 | impact_rank.inflation <= 15) %>%
+    mutate(
+      highlight = ifelse(impact_rank.pre <= 10 | impact_rank.inflation <= 10, "T", "F"),
+      alpha = ifelse(impact_rank.pre <= 10 | impact_rank.inflation <= 10, 1, 1)
+      ) %>%
+    pivot_longer(c(impact_rank.pre, impact_rank.inflation), names_to = "period") %>%
+    mutate(
+      period = str_replace(period, "impact_rank.", ""),
+      period = if_else(period == "pre", "pre-inflation", period),
+      period = factor(period, levels = c("pre-inflation", "inflation")),
+      value = if_else(value >= 15, 15, value),
+      value = fct_reorder(as.character(value), -value),
+      value = fct_recode(value, "15+" = "15")
+      ) %>%
+    ggplot() + 
+    geom_point(aes(x = period, y = value, color = highlight, fill = highlight)) +
+    geom_line(aes(x = period, y = value, group = industry, color = highlight, size = highlight)) + 
+    theme_light() + 
+    theme(
+      legend.position = "none",
+      plot.title = element_text(size = 12),
+      plot.subtitle = element_text(size = 8, color = "#566573")
+    ) + 
+    scale_size_manual(values = c("T" = 0.9, "F" = 0.5), breaks = c("T", "F")) + 
+    scale_color_manual(values = c("T" = "black", "F" = "gray"), breaks = c("T", "F")) + 
+    scale_fill_manual(values = c("T" = "black", "F" = "gray"), breaks = c("T", "F")) + 
+    scale_x_discrete(expand = c(0.05, 0.05)) + 
+    ylab("impact rank") + 
+    labs(title = "Comparison of impact ranks", subtitle = "Black lines highlight top ten ranked\nindustries in either period") 
+  
+  if (smaller_title){
+    cropped_latent_ssp_plot <-
+      cropped_latent_ssp_plot +
+      theme(plot.subtitle = element_text(size = 10))
 
+    cropped_inflationary_period_ssp_plot <-
+      cropped_inflationary_period_ssp_plot +
+      theme(plot.subtitle = element_text(size = 10))
+
+    cropped_dot_compare_plt <-
+      cropped_dot_compare_plt +
+      theme(
+        plot.title = element_text(size = 10),
+        plot.subtitle = element_text(size = 8, color = "#566573")
+      )
+
+  }
+    
+  joint_plot <- plot_grid(
+    cropped_latent_ssp_plot,
+    cropped_inflationary_period_ssp_plot,
+    cropped_dot_compare_plt, 
+    nrow = 1, rel_widths = c(1, 1, 0.6))
+  
+  ggsave(glue("{output_path}/cropped_compare_ssp.png"), joint_plot, width = 14, bg = "white")
+  
+    
 }
 
 ```
 
-# Long Period Analysis
+ # Long Period Analysis
 
 ## Disaggregated
 
@@ -676,7 +802,7 @@ for (analysis_year in 1948:1996){
     read_csv(glue("{proj_root}/data/prepared/industry_codes_1947.csv"), show_col_types = F)
   price_index_df <- 
     read_csv(glue("{proj_root}/data/prepared/price_index/price_index47.csv"), show_col_types = F)
-  exogenous_industry_codes <- c("211", "212", "52", "531", "532RL", "55", "722")
+  exogenous_industry_codes <- c("211", "212", "52", "531", "532RL", "55", "62", "722")
   
   if (analysis_year >= 1963){
    
@@ -707,7 +833,7 @@ for (analysis_year in 1948:1996){
       price_vol_range=0, 
       price_change_range=1
   )
-
+  
 }
 
 ```
@@ -743,7 +869,7 @@ for (analysis_year in 1948:1996){
     read_csv(glue("{proj_root}/data/prepared/industry_codes_1947.csv"), show_col_types = F)
   price_index_df <- 
     read_csv(glue("{proj_root}/data/prepared/price_index/price_index47.csv"), show_col_types = F)
-  exogenous_industry_codes <- c("211", "212", "52", "531", "532RL", "55", "722")
+  exogenous_industry_codes <- c("211", "212", "52", "531", "532RL", "55", "62", "722")
   
   if (analysis_year >= 1963){
     
@@ -998,7 +1124,10 @@ for (i in 1:nrow(var_df)){
     geom_line(aes(x = year, y = value)) + 
     facet_grid(cols = vars(name)) + 
     theme_minimal() + 
-    theme(strip.text.x = element_text(size = 8, color = "#333333")) + 
+    theme(
+      strip.text.x = element_text(size = 8.5, color = "#333333"),
+      #plot.title = element_text(size = 12)
+      ) + 
     labs(title = ititle) + 
     xlab("")
   
@@ -1023,7 +1152,79 @@ for (i in 1:nrow(var_df)){
 }
 
 top_SSP_component_plot <- plot_grid(plotlist = plotlists, ncol = 1)
-ggsave(glue("{proj_root}/results/long_term/top_SSP_components.png"), top_SSP_component_plot, bg = "white", width = 18)
+ggsave(glue("{proj_root}/results/long_term/top_SSP_components.png"), top_SSP_component_plot, bg = "white", width = 18, dpi = 600)
+  
+```
+
+
+### Temporary SSP Component Plot
+
+```{r}
+
+temp_SSP_industry <- c("51", "54", "42", "22")
+
+temp_SSP_component_df <- 
+  ranks_df %>%
+  filter(industry %in% temp_SSP_industry) %>%
+  mutate(
+    name = str_replace_all(name, "_", " "),
+    industry = glue("[{industry}]"),
+    code_name = glue("{name}  {industry}")
+  ) %>%
+  pivot_longer(c(share_personal_consump, price_shock_pct, rank_fl), names_to = "var") 
+
+component_median_df <- 
+  ranks_df %>%
+  filter(!(industry %in% temp_SSP_industry)) %>%
+  pivot_longer(c(share_personal_consump, price_shock_pct, rank_fl), names_to = "var") %>%
+  group_by(year, var) %>%
+  summarise(median_val = median(value, na.rm = T))
+
+var_df <- 
+  tibble(
+    var = c("price_shock_pct", "share_personal_consump", "rank_fl"),
+    title = c("Price Change (%)", "Share of Personal Consumption", "Forward Linkages (Rank)")
+  )
+
+plotlists <- list()
+for (i in 1:nrow(var_df)){
+  
+  ivar <- var_df$var[i]
+  ititle <- var_df$title[i]
+  
+  plotlists[[i]] <- 
+    temp_SSP_component_df %>%
+    filter(var == ivar) %>%
+    ggplot() + 
+    geom_line(aes(x = year, y = value)) + 
+    facet_grid(cols = vars(name)) + 
+    theme_minimal() + 
+    theme(strip.text.x = element_text(size = 8, color = "#333333")) + 
+    labs(title = ititle) + 
+    xlab("")
+  
+  if (i == 3){
+     plotlists[[i]] <-
+      plotlists[[i]] + scale_y_reverse(limits = c(47, 1)) +
+       ylab("rank") 
+  }
+    
+  if (i != 3){
+    plotlists[[i]] <-
+      plotlists[[i]] +
+      ylab("%") +
+      geom_line(
+        data = component_median_df %>% filter(var == ivar),
+        aes(x = year, y = median_val),
+        color = "red"
+      ) + 
+      labs(title = glue("{ititle} - red line indicates median value for other sectors"))
+  }
+  
+}
+
+temp_SSP_component_plot <- plot_grid(plotlist = plotlists, ncol = 1)
+ggsave(glue("{proj_root}/results/long_term/temp_SSP_components.png"), temp_SSP_component_plot, bg = "white", width = 18)
   
 ```
 
@@ -1114,12 +1315,17 @@ file.copy(
   overwrite = T
 )
 
+file.copy(
+  glue("{proj_root}/results/long_term/temp_SSP_components.png"),
+  glue("{proj_root}/results/publish/fig05-temp_SSP_components.png.png"),
+  overwrite = T
+)
 
 years <- c(
   "50-51", "56-58", "67-70", "73-75", "78-80"
 )
 
-i <- 5
+i <- 6
 for (y in years){
   istr <- str_pad(as.character(i), 2, pad = "0")
   file.copy(
@@ -1130,16 +1336,111 @@ for (y in years){
   i <- i + 1
 }
 
-for (y in years){
-  istr <- str_pad(as.character(i), 2, pad = "0")
-  file.copy(
-    glue("{proj_root}/results/period/{y}/component_change.png"),
-    glue("{proj_root}/results/publish/fig{istr}-{y}-component_change.png"),
-    overwrite = T
+# for (y in years){
+#   istr <- str_pad(as.character(i), 2, pad = "0")
+#   file.copy(
+#     glue("{proj_root}/results/period/{y}/component_change.png"),
+#     glue("{proj_root}/results/publish/fig{istr}-{y}-component_change.png"),
+#     overwrite = T
+#   )
+#   i <- i + 1
+# }
+
+```
+```{r}
+
+gt_df <- 
+  tibble(
+    period = c(rep("1950-51", 6), rep("1956-58", 4), rep("1967-70", 7), rep("1973-75", 8),  rep("1978-80", 4)),
+    sector = c("Food and Beverage and Tobacco Products", "Farms", "Retail Trade", "Real Estate", "Apparel and Leather and Allied Products", "Wholesale Trade", "Food and Beverage and Tobacco Products", "Retail Trade", "Real Estate", "Farms", "Retail Trade", "Real Estate", "Food and Beverage and Tobacco Products", "Food Services and Drinking Places", "Other Services Except Government", "Federal Reserve Banks Credit Intermediation", "Hospitality and Nursing and Residential Care Facilities", " Ambulatory Health Services", "Retail Trade", "Petroleum and Coal Products", "Food and Beverage and Tobacco Products", "Real Estate", "Oil and Gas Extraction", "Chemical Products", "Utilities", "Petroleum and Coal Products", "Retail Trade", "Oil and Gas Extraction", "Real Estate")
   )
-  i <- i + 1
-}
+
+sum_df <- 
+  gt_df %>%
+  group_by(sector) %>%
+  summarise(n_periods_ssp = n()) 
+
+gt_df %>%
+  mutate(check = "✔") %>%
+  pivot_wider(sector, names_from = period, values_from = c(check)) %>%
+  left_join(sum_df, by = "sector") %>%
+  arrange(desc(n_periods_ssp)) %>%
+  select(-n_periods_ssp) %>%
+  mutate(across(everything(),  ~ replace_na(.x, ""))) %>%
+  rename(Sector = sector) %>%
+  gt() %>%
+  opt_stylize(style = 6, color = "gray") %>% 
+  tab_style(
+    style = cell_borders(
+      color = "black",
+      weight = px(1),
+      style = "solid"
+    ),
+    locations = cells_body()) %>%
+  cols_width(
+    starts_with("19") ~ px(100),
+  ) %>%
+  tab_header(
+    title = "SSPs Across Inflationary Periods",
+  ) %>%
+  cols_align(align = "center", columns = -Sector) %>%
+  gtsave(glue("{proj_root}/results/period/tbl.png"), expand = 10)
 
 ```
 
+```{r}
+
+exogenous_industry_codes47 <- c("211", "212", "52", "531", "532RL", "55", "62", "722")
+
+exogenous_industry_codes63 <- 
+  c("211", "212", "521CI", "523", "524", "525", 
+    "531", "532RL","55", "621", "622HO", "713", "722")
+
+industry_codes63_df <- 
+  read_csv(glue("{proj_root}/data/prepared/industry_codes_1963_matched.csv")) 
+
+for (i in 1:5){
+  
+  industry_codes63_df %>%
+    filter(row_number() >= (i-1)*13, row_number() <i*13) %>%
+    select(code, name, code_match47, name_match47) %>%
+    mutate(
+      name = str_replace_all(name, "_", " "),
+      name_match47 = str_replace_all(name_match47, "_", " "),
+      exogenous47 = if_else(code_match47 %in% exogenous_industry_codes47, "✔", "") ,
+      exogenous63 = if_else(code %in% exogenous_industry_codes63, "✔", "") 
+    ) %>%
+    #filter((code != code_match47) | exogenous47 != "" | exogenous63 != "") %>%
+    select(
+      `NAICS Code` = code,
+      Industry = name,
+      Exogenous = exogenous63,
+      `NAICS Code ` = code_match47,
+      `Industry ` = name_match47,
+      `Exogenous ` = exogenous47
+    ) %>%
+    gt() %>%
+      tab_spanner(
+        label = "Industries 1963-96",
+        columns = c(
+          `NAICS Code`, Industry, Exogenous
+        )
+      ) %>%
+   tab_spanner(
+        label = "Aggregation up to 1947 industry set",
+        columns = c(
+          `NAICS Code `, `Industry `, `Exogenous `
+        )
+      ) %>%
+    cols_width(
+      starts_with("Industry") ~ px(150),
+      everything() ~ px(100)
+    ) %>%
+    opt_stylize(style = 5, color = "gray") %>%
+    cols_align(align = "center") %>%
+    gtsave(glue("{proj_root}/results/industry_agg_tbl{i}.png"), expand = 10)
+    
+}
+
+```
 
